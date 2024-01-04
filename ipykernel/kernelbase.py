@@ -21,6 +21,8 @@ from datetime import datetime
 from functools import partial
 from signal import SIGINT, SIGTERM, Signals, default_int_handler, signal
 
+import tornado.ioloop as tornado_ioloop
+
 from .control import CONTROL_THREAD_NAME
 
 if sys.platform != "win32":
@@ -144,10 +146,12 @@ class Kernel(SingletonConfigurable):
     debug_shell_socket = Any()
 
     control_thread = Any()
+    shell_thread = Any()
     iopub_socket = Any()
     iopub_thread = Any()
     stdin_socket = Any()
     log: logging.Logger = Instance(logging.Logger, allow_none=True)  # type:ignore[assignment]
+    subshell_cache = Any()
 
     # identities:
     int_id = Integer(-1)
@@ -267,11 +271,15 @@ class Kernel(SingletonConfigurable):
         "abort_request",
         "debug_request",
         "usage_request",
+        "create_subshell_request",
     ]
 
     def __init__(self, **kwargs):
         """Initialize the kernel."""
         super().__init__(**kwargs)
+
+        self.subshell_cache = {}
+
         # Build dict of handlers for message types
         self.shell_handlers = {}
         for msg_type in self.msg_types:
@@ -287,6 +295,9 @@ class Kernel(SingletonConfigurable):
         self._do_exec_accepted_params = _accepts_parameters(
             self.do_execute, ["cell_meta", "cell_id"]
         )
+
+        # Main shell thread.
+        self.acontext = zmq.asyncio.Context()
 
     def dispatch_control(self, msg):
         self.control_queue.put_nowait(msg)
@@ -375,10 +386,11 @@ class Kernel(SingletonConfigurable):
             return False
         return True
 
-    async def dispatch_shell(self, msg):
+    async def dispatch_shell(self, msg, stream):
         """dispatch shell requests"""
         if not self.session:
             return
+
         # flush control queue before handling shell requests
         await self._flush_control_queue()
 
@@ -397,12 +409,12 @@ class Kernel(SingletonConfigurable):
 
         # Only abort execute requests
         if self._aborting and msg_type == "execute_request":
-            self._send_abort_reply(self.shell_stream, msg, idents)
+            self._send_abort_reply(stream, msg, idents)
             self._publish_status("idle", "shell")
             # flush to ensure reply is sent before
             # handling the next request
-            if self.shell_stream:
-                self.shell_stream.flush(zmq.POLLOUT)
+            if stream:
+                stream.flush(zmq.POLLOUT)
             return
 
         # Print some info about this message and leave a '--->' marker, so it's
@@ -411,7 +423,7 @@ class Kernel(SingletonConfigurable):
         self.log.debug("\n*** MESSAGE TYPE:%s***", msg_type)
         self.log.debug("   Content: %s\n   --->\n   ", msg["content"])
 
-        if not self.should_handle(self.shell_stream, msg, idents):
+        if not self.should_handle(stream, msg, idents):
             return
 
         handler = self.shell_handlers.get(msg_type, None)
@@ -424,7 +436,7 @@ class Kernel(SingletonConfigurable):
             except Exception:
                 self.log.debug("Unable to signal in pre_handler_hook:", exc_info=True)
             try:
-                result = handler(self.shell_stream, idents, msg)
+                result = handler(stream, idents, msg)
                 if inspect.isawaitable(result):
                     await result
             except Exception:
@@ -443,8 +455,9 @@ class Kernel(SingletonConfigurable):
         self._publish_status("idle", "shell")
         # flush to ensure reply is sent before
         # handling the next request
-        if self.shell_stream:
-            self.shell_stream.flush(zmq.POLLOUT)
+
+        if stream:
+            stream.flush(zmq.POLLOUT)
 
     def pre_handler_hook(self):
         """Hook to execute before calling message handler"""
@@ -469,11 +482,6 @@ class Kernel(SingletonConfigurable):
             if self.eventloop is not eventloop:
                 self.log.info("exiting eventloop %s", eventloop)
                 return
-            if self.msg_queue.qsize():
-                self.log.debug("Delaying eventloop due to waiting messages")
-                # still messages to process, make the eventloop wait
-                schedule_next()
-                return
             self.log.debug("Advancing eventloop %s", eventloop)
             try:
                 eventloop(self)
@@ -494,47 +502,6 @@ class Kernel(SingletonConfigurable):
         # begin polling the eventloop
         schedule_next()
 
-    async def do_one_iteration(self):
-        """Process a single shell message
-
-        Any pending control messages will be flushed as well
-
-        .. versionchanged:: 5
-            This is now a coroutine
-        """
-        # flush messages off of shell stream into the message queue
-        if self.shell_stream:
-            self.shell_stream.flush()
-        # process at most one shell message per iteration
-        await self.process_one(wait=False)
-
-    async def process_one(self, wait=True):
-        """Process one request
-
-        Returns None if no message was handled.
-        """
-        if wait:
-            t, dispatch, args = await self.msg_queue.get()
-        else:
-            try:
-                t, dispatch, args = self.msg_queue.get_nowait()
-            except (asyncio.QueueEmpty, QueueEmpty):
-                return
-        await dispatch(*args)
-
-    async def dispatch_queue(self):
-        """Coroutine to preserve order of message handling
-
-        Ensures that only one message is processing at a time,
-        even when the handler is async
-        """
-
-        while True:
-            try:
-                await self.process_one()
-            except Exception:
-                self.log.exception("Error in message handler")
-
     _message_counter = Any(
         help="""Monotonic counter of messages
         """,
@@ -544,25 +511,53 @@ class Kernel(SingletonConfigurable):
     def _message_counter_default(self):
         return itertools.count()
 
-    def schedule_dispatch(self, dispatch, *args):
-        """schedule a message for dispatch"""
-        idx = next(self._message_counter)
+    async def _shell_thread_worker_impl(self, stream, msg):
+        await self.dispatch_shell(msg, stream)
 
-        self.msg_queue.put_nowait(
-            (
-                idx,
-                dispatch,
-                args,
-            )
+    def _shell_thread_worker(self, shell_id, shell_id_dict, acontext):
+        # Create socket and stream for this main/sub-shell thread.
+        # They need to be created in the thread that uses them as socket is not threadsafe.
+        socket = acontext.socket(zmq.ROUTER)
+        socket.linger = 1000
+
+        # Need to store port as it will be random for sub-shells.
+        app = self.parent
+        port = 0 if shell_id else app.shell_port
+        port = app._bind_socket(socket, port)
+
+        stream = ZMQStream(socket)
+
+        if shell_id:
+            # Is subshell, need to record port number used for shell_socket.
+            shell_id_dict["port"] = port
+        else:
+            # Setting attributes used in other thread might be dodgy.
+            self.shell_socket = socket
+            self.shell_stream = stream
+
+        stream.on_recv_stream(self._shell_thread_worker_impl, copy=False)
+
+        ioloop = tornado_ioloop.IOLoop.current()
+
+        # Maybe want to store socket, stream, etc
+
+        ioloop.start()
+
+    def _create_shell_thread(self, shell_id, shell_id_dict):
+        thread = threading.Thread(
+            name="shell",
+            target=self._shell_thread_worker,
+            args=(shell_id, shell_id_dict, self.acontext),
         )
-        # ensure the eventloop wakes up
-        self.io_loop.add_callback(lambda: None)
+        self.shell_thread = thread
+        thread.start()
 
     def start(self):
         """register dispatchers for streams"""
+
+        self._create_shell_thread(None, None)
+
         self.io_loop = ioloop.IOLoop.current()
-        self.msg_queue: Queue[t.Any] = Queue()
-        self.io_loop.add_callback(self.dispatch_queue)
 
         if self.control_stream:
             self.control_stream.on_recv(self.dispatch_control, copy=False)
@@ -570,14 +565,6 @@ class Kernel(SingletonConfigurable):
         control_loop = self.control_thread.io_loop if self.control_thread else self.io_loop
 
         asyncio.run_coroutine_threadsafe(self.poll_control_queue(), control_loop.asyncio_loop)
-        if self.shell_stream:
-            self.shell_stream.on_recv(
-                partial(
-                    self.schedule_dispatch,
-                    self.dispatch_shell,
-                ),
-                copy=False,
-            )
 
         # publish idle status
         self._publish_status("starting", "shell")
@@ -767,13 +754,13 @@ class Kernel(SingletonConfigurable):
             reply_content = await reply_content
 
         # Flush output before sending the reply.
-        sys.stdout.flush()
-        sys.stderr.flush()
+        # sys.stdout.flush()
+        # sys.stderr.flush()
         # FIXME: on rare occasions, the flush doesn't seem to make it to the
         # clients... This seems to mitigate the problem, but we definitely need
         # to better understand what's going on.
-        if self._execute_sleep:
-            time.sleep(self._execute_sleep)
+        # if self._execute_sleep:
+        #    time.sleep(self._execute_sleep)
 
         # Send the reply.
         reply_content = json_clean(reply_content)
@@ -990,9 +977,10 @@ class Kernel(SingletonConfigurable):
             control_io_loop.add_callback(control_io_loop.stop)
 
         self.log.debug("Stopping shell ioloop")
-        if self.shell_stream:
-            shell_io_loop = self.shell_stream.io_loop
-            shell_io_loop.add_callback(shell_io_loop.stop)
+
+        # if self.shell_stream:
+        #     shell_io_loop = self.shell_stream.io_loop
+        #     shell_io_loop.add_callback(shell_io_loop.stop)
 
     def do_shutdown(self, restart):
         """Override in subclasses to do things when the frontend shuts down the
@@ -1081,6 +1069,25 @@ class Kernel(SingletonConfigurable):
 
     async def do_debug_request(self, msg):
         raise NotImplementedError
+
+    async def create_subshell_request(self, stream, ident, parent):
+        shell_id = str(uuid.uuid4())  # Should maybe use this as dependent kernel_id ?
+
+        # Create and start subshell thread.
+        shell_id_dict = {"port": 0}
+        self._create_shell_thread(shell_id, shell_id_dict)
+
+        # Should wait until port is available here...  Need to do this properly.
+        await asyncio.sleep(0.1)
+        port = shell_id_dict["port"]
+
+        self.subshell_cache[shell_id] = shell_id_dict
+        content = {
+            "status": "ok",
+            "shell_id": shell_id,
+            "port": port,
+        }
+        self.session.send(stream, "create_subshell_reply", content, parent, ident)
 
     # ---------------------------------------------------------------------------
     # Engine methods (DEPRECATED)
@@ -1180,8 +1187,8 @@ class Kernel(SingletonConfigurable):
 
         # flush streams, so all currently waiting messages
         # are added to the queue
-        if self.shell_stream:
-            self.shell_stream.flush()
+        # if self.shell_stream:
+        #     self.shell_stream.flush()
 
         # Callback to signal that we are done aborting
         # dispatch functions _must_ be async
@@ -1192,11 +1199,11 @@ class Kernel(SingletonConfigurable):
         # put the stop-aborting event on the message queue
         # so that all messages already waiting in the queue are aborted
         # before we reset the flag
-        schedule_stop_aborting = partial(self.schedule_dispatch, stop_aborting)
+        # schedule_stop_aborting = partial(self.schedule_dispatch, stop_aborting)
 
         # if we have a delay, give messages this long to arrive on the queue
         # before we stop aborting requests
-        asyncio.get_event_loop().call_later(self.stop_on_error_timeout, schedule_stop_aborting)
+        # asyncio.get_event_loop().call_later(self.stop_on_error_timeout, schedule_stop_aborting)
 
     def _send_abort_reply(self, stream, msg, idents):
         """Send a reply to an aborted request"""
