@@ -18,6 +18,7 @@ from logging import StreamHandler
 from pathlib import Path
 
 import zmq
+import zmq.asyncio
 from IPython.core.application import (  # type:ignore[attr-defined]
     BaseIPythonApplication,
     base_aliases,
@@ -135,6 +136,7 @@ class IPKernelApp(BaseIPythonApplication, InteractiveShellApp, ConnectionFileMix
     heartbeat = Instance(Heartbeat, allow_none=True)
 
     context: zmq.Context[t.Any] | None = Any()  # type:ignore[assignment]
+    acontext: zmq.asyncio.Context
     shell_socket = Any()
     control_socket = Any()
     debugpy_socket = Any()
@@ -324,23 +326,25 @@ class IPKernelApp(BaseIPythonApplication, InteractiveShellApp, ConnectionFileMix
         self.log.info("Starting the kernel at pid: %i", os.getpid())
         assert self.context is None, "init_sockets cannot be called twice!"
         self.context = context = zmq.Context()
+        # self.acontext = zmq.asyncio.Context()
         atexit.register(self.close)
 
-        self.shell_socket = context.socket(zmq.ROUTER)
-        self.shell_socket.linger = 1000
-        self.shell_port = self._bind_socket(self.shell_socket, self.shell_port)
-        self.log.debug("shell ROUTER Channel on port: %i" % self.shell_port)
+        # self.shell_socket = context.socket(zmq.ROUTER)
+        # self.shell_socket.linger = 1000
+        # self.shell_port = self._bind_socket(self.shell_socket, self.shell_port)
+        # self.log.debug("shell ROUTER Channel on port: %i" % self.shell_port)
+        # (f"  shell_socket {self.shell_socket}")
 
         self.stdin_socket = context.socket(zmq.ROUTER)
         self.stdin_socket.linger = 1000
         self.stdin_port = self._bind_socket(self.stdin_socket, self.stdin_port)
         self.log.debug("stdin ROUTER Channel on port: %i" % self.stdin_port)
 
-        if hasattr(zmq, "ROUTER_HANDOVER"):
-            # set router-handover to workaround zeromq reconnect problems
-            # in certain rare circumstances
-            # see ipython/ipykernel#270 and zeromq/libzmq#2892
-            self.shell_socket.router_handover = self.stdin_socket.router_handover = 1
+        # if hasattr(zmq, "ROUTER_HANDOVER"):
+        # set router-handover to workaround zeromq reconnect problems
+        # in certain rare circumstances
+        # see ipython/ipykernel#270 and zeromq/libzmq#2892
+        #    self.shell_socket.router_handover = self.stdin_socket.router_handover = 1
 
         self.init_control(context)
         self.init_iopub(context)
@@ -357,8 +361,8 @@ class IPKernelApp(BaseIPythonApplication, InteractiveShellApp, ConnectionFileMix
 
         self.debug_shell_socket = context.socket(zmq.DEALER)
         self.debug_shell_socket.linger = 1000
-        if self.shell_socket.getsockopt(zmq.LAST_ENDPOINT):
-            self.debug_shell_socket.connect(self.shell_socket.getsockopt(zmq.LAST_ENDPOINT))
+        # if self.shell_socket.getsockopt(zmq.LAST_ENDPOINT):
+        #    self.debug_shell_socket.connect(self.shell_socket.getsockopt(zmq.LAST_ENDPOINT))
 
         if hasattr(zmq, "ROUTER_HANDOVER"):
             # set router-handover to workaround zeromq reconnect problems
@@ -406,6 +410,10 @@ class IPKernelApp(BaseIPythonApplication, InteractiveShellApp, ConnectionFileMix
             self.log.debug("Closing control thread")
             self.control_thread.stop()
             self.control_thread.join()
+        # if self.shell_thread and self.shell_thread["thread"].is_alive():
+        #     self.log.debug("Closing main shell thread")
+        #     self.shell_thread["thread"].stop()
+        #     self.shell_thread["thread"].join()
 
         if self.debugpy_socket and not self.debugpy_socket.closed:
             self.debugpy_socket.close()
@@ -546,7 +554,6 @@ class IPKernelApp(BaseIPythonApplication, InteractiveShellApp, ConnectionFileMix
 
     def init_kernel(self):
         """Create the Kernel object itself"""
-        shell_stream = ZMQStream(self.shell_socket)
         control_stream = ZMQStream(self.control_socket, self.control_thread.io_loop)
         debugpy_stream = ZMQStream(self.debugpy_socket, self.control_thread.io_loop)
         self.control_thread.start()
@@ -558,8 +565,9 @@ class IPKernelApp(BaseIPythonApplication, InteractiveShellApp, ConnectionFileMix
             control_stream=control_stream,
             debugpy_stream=debugpy_stream,
             debug_shell_socket=self.debug_shell_socket,
-            shell_stream=shell_stream,
+            # shell_stream=shell_stream,
             control_thread=self.control_thread,
+            # shell_thread=self.shell_thread,
             iopub_thread=self.iopub_thread,
             iopub_socket=self.iopub_socket,
             stdin_socket=self.stdin_socket,
