@@ -545,6 +545,9 @@ class Kernel(SingletonConfigurable):
             target=self._shell_thread_worker,
             args=(shell_id, shell_id_dict, self.acontext),
         )
+
+        shell_id_dict["thread"] = thread
+
         self.shell_thread = {
             "thread": thread,
             # "socket": socket,
@@ -554,7 +557,9 @@ class Kernel(SingletonConfigurable):
     def start(self):
         """register dispatchers for streams"""
 
-        self._create_shell_thread(None, None)
+        shell_id_dict = {"port": self.parent._ports["shell"]}
+        self._create_shell_thread(None, shell_id_dict)
+        self.subshell_cache[None] = shell_id_dict
 
         self.io_loop = ioloop.IOLoop.current()
 
