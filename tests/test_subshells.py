@@ -150,7 +150,7 @@ def test_run_concurrently_sequence(are_subshells, overlap, request):
             kc.shell_channel.send(msg)
             msgs.append(msg)
 
-        replies = get_replies(kc, [msg["msg_id"] for msg in msgs])
+        replies = get_replies(kc, [msg["msg_id"] for msg in msgs], timeout=None)
 
         for subshell_id in subshell_ids:
             if subshell_id:
