@@ -10,7 +10,7 @@ import time
 import pytest
 from jupyter_client.blocking.client import BlockingKernelClient
 
-from .utils import TIMEOUT, assemble_output, get_replies, get_reply, new_kernel
+from .utils import TIMEOUT, get_replies, get_reply, new_kernel, wait_for_idle
 
 # Helpers
 
@@ -20,7 +20,7 @@ def create_subshell_helper(kc: BlockingKernelClient):
     kc.control_channel.send(msg)
     msg_id = msg["header"]["msg_id"]
     reply = get_reply(kc, msg_id, TIMEOUT, channel="control")
-    assemble_output(kc.get_iopub_msg, None)  # wait for idle
+    wait_for_idle(kc)
     return reply["content"]
 
 
@@ -29,7 +29,7 @@ def delete_subshell_helper(kc: BlockingKernelClient, subshell_id: str):
     kc.control_channel.send(msg)
     msg_id = msg["header"]["msg_id"]
     reply = get_reply(kc, msg_id, TIMEOUT, channel="control")
-    assemble_output(kc.get_iopub_msg, None)  # wait for idle
+    wait_for_idle(kc)
     return reply["content"]
 
 
@@ -38,7 +38,7 @@ def list_subshell_helper(kc: BlockingKernelClient):
     kc.control_channel.send(msg)
     msg_id = msg["header"]["msg_id"]
     reply = get_reply(kc, msg_id, TIMEOUT, channel="control")
-    assemble_output(kc.get_iopub_msg, None)  # wait for idle
+    wait_for_idle(kc)
     return reply["content"]
 
 
@@ -52,8 +52,20 @@ def execute_request(kc: BlockingKernelClient, code: str, subshell_id: str | None
 def execute_request_subshell_id(
     kc: BlockingKernelClient, code: str, subshell_id: str | None, terminator: str = "\n"
 ):
-    execute_request(kc, code, subshell_id)
-    stdout, _ = assemble_output(kc.get_iopub_msg, None)
+    msg = execute_request(kc, code, subshell_id)
+    msg_id = msg["msg_id"]
+    stdout = ""
+    while True:
+        msg = kc.get_iopub_msg()
+        # Get the stream messages corresponding to msg_id
+        if (
+            msg["msg_type"] == "stream"
+            and msg["parent_header"]["msg_id"] == msg_id
+            and msg["content"]["name"] == "stdout"
+        ):
+            stdout += msg["content"]["text"]
+            if stdout.endswith(terminator):
+                break
     return stdout.strip()
 
 
