@@ -10,7 +10,7 @@ import time
 import pytest
 from jupyter_client.blocking.client import BlockingKernelClient
 
-from .utils import TIMEOUT, get_replies, get_reply, new_kernel, wait_for_idle
+from .utils import TIMEOUT, assemble_output, get_replies, get_reply, new_kernel, wait_for_idle
 
 # Helpers
 
@@ -52,20 +52,8 @@ def execute_request(kc: BlockingKernelClient, code: str, subshell_id: str | None
 def execute_request_subshell_id(
     kc: BlockingKernelClient, code: str, subshell_id: str | None, terminator: str = "\n"
 ):
-    msg = execute_request(kc, code, subshell_id)
-    msg_id = msg["msg_id"]
-    stdout = ""
-    while True:
-        msg = kc.get_iopub_msg()
-        # Get the stream messages corresponding to msg_id
-        if (
-            msg["msg_type"] == "stream"
-            and msg["parent_header"]["msg_id"] == msg_id
-            and msg["content"]["name"] == "stdout"
-        ):
-            stdout += msg["content"]["text"]
-            if stdout.endswith(terminator):
-                break
+    execute_request(kc, code, subshell_id)
+    stdout, _ = assemble_output(kc.get_iopub_msg, None)
     return stdout.strip()
 
 
