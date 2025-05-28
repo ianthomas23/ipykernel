@@ -171,12 +171,12 @@ def new_kernel(argv=None):
     return manager.run_kernel(**kwargs)
 
 
-def assemble_output(get_msg):
+def assemble_output(get_msg, timeout=1):
     """assemble stdout/err from an execution"""
     stdout = ""
     stderr = ""
     while True:
-        msg = get_msg(timeout=1)
+        msg = get_msg(timeout=timeout)
         msg_type = msg["msg_type"]
         content = msg["content"]
         if msg_type == "status" and content["execution_state"] == "idle":

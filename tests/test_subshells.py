@@ -20,7 +20,7 @@ def create_subshell_helper(kc: BlockingKernelClient):
     kc.control_channel.send(msg)
     msg_id = msg["header"]["msg_id"]
     reply = get_reply(kc, msg_id, TIMEOUT, channel="control")
-    assemble_output(kc.get_iopub_msg)  # wait for idle
+    assemble_output(kc.get_iopub_msg, None)  # wait for idle
     return reply["content"]
 
 
@@ -29,7 +29,7 @@ def delete_subshell_helper(kc: BlockingKernelClient, subshell_id: str):
     kc.control_channel.send(msg)
     msg_id = msg["header"]["msg_id"]
     reply = get_reply(kc, msg_id, TIMEOUT, channel="control")
-    assemble_output(kc.get_iopub_msg)  # wait for idle
+    assemble_output(kc.get_iopub_msg, None)  # wait for idle
     return reply["content"]
 
 
@@ -38,7 +38,7 @@ def list_subshell_helper(kc: BlockingKernelClient):
     kc.control_channel.send(msg)
     msg_id = msg["header"]["msg_id"]
     reply = get_reply(kc, msg_id, TIMEOUT, channel="control")
-    assemble_output(kc.get_iopub_msg)  # wait for idle
+    assemble_output(kc.get_iopub_msg, None)  # wait for idle
     return reply["content"]
 
 
@@ -53,7 +53,7 @@ def execute_request_subshell_id(
     kc: BlockingKernelClient, code: str, subshell_id: str | None, terminator: str = "\n"
 ):
     execute_request(kc, code, subshell_id)
-    stdout, _ = assemble_output(kc.get_iopub_msg)
+    stdout, _ = assemble_output(kc.get_iopub_msg, None)
     return stdout.strip()
 
 
