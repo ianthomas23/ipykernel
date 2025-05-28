@@ -65,7 +65,7 @@ def get_reply(kc, msg_id, timeout=TIMEOUT, channel="shell"):
 def get_replies(kc, msg_ids: list[str], timeout=TIMEOUT, channel="shell"):
     # Get replies which may arrive in any order as they may be running on different subshells.
     # Replies are returned in the same order as the msg_ids, not in the order of arrival.
-    t0 = time()
+    #t0 = time()
     count = 0
     replies = [None] * len(msg_ids)
     while count < len(msg_ids):
@@ -78,9 +78,9 @@ def get_replies(kc, msg_ids: list[str], timeout=TIMEOUT, channel="shell"):
         except ValueError:
             # Allow debugging ignored replies
             print(f"Ignoring reply not to any of {msg_ids}: {reply}")
-        t1 = time()
-        timeout -= t1 - t0
-        t0 = t1
+        #t1 = time()
+        #timeout -= t1 - t0
+        #t0 = t1
     return replies
 
 
