@@ -49,12 +49,37 @@ def execute_request(kc: BlockingKernelClient, code: str, subshell_id: str | None
     return msg
 
 
+#def execute_request_subshell_id(
+#    kc: BlockingKernelClient, code: str, subshell_id: str | None, terminator: str = "\n"
+#):
+#    execute_request(kc, code, subshell_id)
+#    stdout, _ = assemble_output(kc.get_iopub_msg, None)   # might be bad if to do with idle status....
+#    return stdout.strip()
+
+
 def execute_request_subshell_id(
     kc: BlockingKernelClient, code: str, subshell_id: str | None, terminator: str = "\n"
 ):
-    execute_request(kc, code, subshell_id)
-    stdout, _ = assemble_output(kc.get_iopub_msg, None)
+    msg = kc.session.msg("execute_request", {"code": code})
+    msg["header"]["subshell_id"] = subshell_id
+    msg_id = msg["msg_id"]
+    kc.shell_channel.send(msg)
+    stdout = ""
+    while True:
+        msg = kc.get_iopub_msg()
+        # Get the stream messages corresponding to msg_id
+        if (
+            msg["msg_type"] == "stream"
+            and msg["parent_header"]["msg_id"] == msg_id
+            and msg["content"]["name"] == "stdout"
+        ):
+            stdout += msg["content"]["text"]
+            if stdout.endswith(terminator):
+                break
     return stdout.strip()
+
+
+
 
 
 def execute_thread_count(kc: BlockingKernelClient) -> int:
@@ -147,8 +172,16 @@ def test_run_concurrently_sequence(are_subshells, overlap, request):
         for subshell_id, code in zip(subshell_ids, codes):
             msg = kc.session.msg("execute_request", {"code": code})
             msg["header"]["subshell_id"] = subshell_id
+
+
+            #with open("/Users/iant/github/ipykernel/debug.txt", "a") as f:
+            #    f.write(f"--test-- sending execute request to subshell {subshell_id} {code}\n")
+            
             kc.shell_channel.send(msg)
             msgs.append(msg)
+
+        #with open("/Users/iant/github/ipykernel/debug.txt", "a") as f:
+        #    f.write(f"--test-- wait for replies\n")
 
         replies = get_replies(kc, [msg["msg_id"] for msg in msgs], timeout=None)
 

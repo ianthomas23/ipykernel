@@ -15,6 +15,9 @@ from traitlets import Any, Dict, Instance
 from ipykernel.jsonutil import encode_images, json_clean
 
 
+import threading
+
+
 class ZMQDisplayHook:
     """A simple displayhook that publishes the object's repr over a ZeroMQ
     socket."""
@@ -44,6 +47,13 @@ class ZMQDisplayHook:
             "data": {"text/plain": repr(obj)},
             "metadata": {},
         }
+
+
+        #with open("debug.txt", "a") as f:
+        #    f.write(f"{threading.current_thread().ident} pub_socket execute_result\n")
+
+
+
         self.session.send(
             self.pub_socket, "execute_result", contents, parent=self.parent_header, ident=self.topic
         )
@@ -97,5 +107,12 @@ class ZMQShellDisplayHook(DisplayHook):
         sys.stdout.flush()
         sys.stderr.flush()
         if self.msg and self.msg["content"]["data"] and self.session:
+
+
+            #with open("debug.txt", "a") as f:
+            #    f.write(f"{threading.current_thread().ident} pub_socket ?finish_displayhook\n")
+
+
+
             self.session.send(self.pub_socket, self.msg, ident=self.topic)
         self.msg = None

@@ -19,6 +19,8 @@ except ImportError:
 
 from .compiler import get_file_name, get_tmp_directory, get_tmp_hash_seed
 
+import threading
+
 try:
     # This import is required to have the next ones working...
     from debugpy.server import api  # noqa: F401
@@ -420,6 +422,13 @@ class Debugger:
             code = "import debugpy;"
             code += 'debugpy.listen(("' + host + '",' + port + "))"
             content = {"code": code, "silent": True}
+
+
+            #with open("debug.txt", "a") as f:
+            #    f.write(f"{threading.current_thread().ident} shell_socket execute_request\n")
+
+
+
             self.session.send(
                 self.shell_socket,
                 "execute_request",
